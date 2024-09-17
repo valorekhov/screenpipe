@@ -9,7 +9,7 @@ use candle::{Device, IndexOp, Tensor};
 use candle_nn::{ops::softmax, VarBuilder};
 use chrono::Utc;
 use hf_hub::{api::sync::Api, Repo, RepoType};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 #[cfg(target_os = "macos")]
 use objc::rc::autoreleasepool;
 use rand::{distributions::Distribution, SeedableRng};
@@ -45,8 +45,8 @@ enum Task {
 // Main STT function
 pub fn perform_stt(
     audio_input: &AudioInput,
-    primary_engine: Arc<dyn SttEngine>,
-    fallback_engine: Option<Arc<dyn SttEngine>>,
+    primary_engine: &Box<dyn SttEngine + Send>,
+    fallback_engine: &Option<Box<dyn SttEngine + Send>>,
     vad_engine: &mut dyn VadEngine,
     output_path: &PathBuf,
 ) -> Result<(String, String)> {
@@ -107,11 +107,11 @@ pub fn perform_stt(
     let transcription = match primary_engine.transcribe(&speech_frames, audio_input.sample_rate, &audio_input.device) {
         Ok(result) => result,
         Err(e) if fallback_engine.is_some() => {
-            error!(
+            warn!(
                 "device: {}, primary engine failed, falling back: {:?}",
                 audio_input.device, e
             );
-            fallback_engine.unwrap().transcribe(&speech_frames, audio_input.sample_rate, &audio_input.device)?
+            fallback_engine.as_ref().unwrap().transcribe(&speech_frames, audio_input.sample_rate, &audio_input.device)?
         }
         Err(e) => return Err(e.into()),
     };

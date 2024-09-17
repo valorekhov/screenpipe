@@ -38,14 +38,6 @@ pub async fn create_whisper_channel(
     Arc<AtomicBool>, // Shutdown flag
 )> {
     let whisper_model = WhisperModel::new(audio_transcription_engine.clone())?;
-    let whisper_engine = WhisperEngine::new(
-        whisper_model,
-    )?;
-    let deepgram_engine = deepgram_api_key.map(DeepgramEngine::new);
-
-    let (primary_engine, secondary_engine): (Arc<dyn SttEngine>, Option<Arc<dyn SttEngine>>) = deepgram_engine
-        .map(|deepgram| (Arc::new(deepgram) as Arc<dyn SttEngine>, Some(Arc::new(whisper_engine) as Arc<dyn SttEngine>)))
-        .unwrap_or_else(|| (Arc::new(whisper_engine) as Arc<dyn SttEngine>, None));
     
     let (input_sender, mut input_receiver): (
         UnboundedSender<AudioInput>,
@@ -63,6 +55,18 @@ pub async fn create_whisper_channel(
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let shutdown_flag_clone = shutdown_flag.clone();
     let output_path = output_path.clone();
+
+    let whisper_engine = WhisperEngine::new(
+        whisper_model,
+    ).expect("Could not create the WhisperEngine");
+    let deepgram_engine = deepgram_api_key.map(DeepgramEngine::new);
+
+    let (primary_engine, secondary_engine): (Box<dyn SttEngine + Send>, Option<Box<dyn SttEngine + Send>>) = 
+        if let Some(deepgram) = deepgram_engine {
+            (Box::new(deepgram) as Box<dyn SttEngine + Send>, Some(Box::new(whisper_engine) as Box<dyn SttEngine + Send>))
+        } else {
+            (Box::new(whisper_engine) as Box<dyn SttEngine + Send>, None)
+        };
 
     tokio::spawn(async move {
         loop {
@@ -110,7 +114,7 @@ pub async fn create_whisper_channel(
                             unreachable!("This code should not be reached on non-macOS platforms")
                         }
                     } else {
-                        match perform_stt(&input, primary_engine, secondary_engine, &mut *vad_engine, &output_path) {
+                        match perform_stt(&input, &primary_engine, &secondary_engine, &mut *vad_engine, &output_path) {
                             Ok((transcription, path)) => TranscriptionResult {
                                 input: input.clone(),
                                 transcription: Some(transcription),
