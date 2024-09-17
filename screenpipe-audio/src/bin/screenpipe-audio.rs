@@ -83,9 +83,9 @@ async fn main() -> Result<()> {
     std::fs::remove_file("output_1.mp4").unwrap_or_default();
 
     let chunk_duration = Duration::from_secs(10);
-    let output_path = PathBuf::from("output.mp4");
+    let output_path = PathBuf::from("/tmp/whisper-out");
     let (whisper_sender, mut whisper_receiver, _) = create_whisper_channel(
-        Arc::new(AudioTranscriptionEngine::WhisperDistilLargeV3),
+        Arc::new(AudioTranscriptionEngine::WhisperTiny),
         VadEngineEnum::WebRtc, // Or VadEngineEnum::WebRtc, hardcoded for now
         deepgram_api_key,
         &output_path,

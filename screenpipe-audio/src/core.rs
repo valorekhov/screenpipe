@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AudioTranscriptionEngine {
+    RestPipe,
     Deepgram,
     WhisperTiny,
     WhisperDistilLargeV3,
@@ -22,6 +23,7 @@ pub enum AudioTranscriptionEngine {
 impl fmt::Display for AudioTranscriptionEngine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            AudioTranscriptionEngine::RestPipe => write!(f, "RestPipe"),
             AudioTranscriptionEngine::Deepgram => write!(f, "Deepgram"),
             AudioTranscriptionEngine::WhisperTiny => write!(f, "WhisperTiny"),
             AudioTranscriptionEngine::WhisperDistilLargeV3 => write!(f, "WhisperLarge"),
