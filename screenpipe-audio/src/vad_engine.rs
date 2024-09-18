@@ -15,6 +15,12 @@ pub trait VadEngine {
 
 pub struct WebRtcVad(webrtc_vad::Vad);
 
+impl Default for WebRtcVad {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WebRtcVad {
     pub fn new() -> Self {
         let mut vad = webrtc_vad::Vad::new();

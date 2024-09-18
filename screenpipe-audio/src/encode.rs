@@ -16,7 +16,7 @@ pub fn encode_single_audio(
 
     let mut command = Command::new(find_ffmpeg_path().unwrap());
     command
-        .args(&[
+        .args([
             "-f",
             "f32le",
             "-ar",

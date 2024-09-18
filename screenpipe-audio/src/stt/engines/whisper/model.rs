@@ -2,7 +2,7 @@ use crate::stt::Task;
 
 use anyhow::{Error as E, Result};
 use candle::{Device, IndexOp, Tensor};
-use candle_nn::{ops::softmax};
+use candle_nn::ops::softmax;
 use log::{error, info};
 #[cfg(target_os = "macos")]
 use objc::rc::autoreleasepool;
@@ -101,7 +101,7 @@ impl<'a> Decoder<'a> {
         timestamps: bool,
         verbose: bool,
     ) -> Result<Self> {
-        let no_timestamps_token = token_id(&tokenizer, m::NO_TIMESTAMPS_TOKEN)?;
+        let no_timestamps_token = token_id(tokenizer, m::NO_TIMESTAMPS_TOKEN)?;
         let suppress_tokens: Vec<f32> = (0..model.config().vocab_size as u32)
             .map(|i| {
                 if model.config().suppress_tokens.contains(&i)
@@ -114,13 +114,13 @@ impl<'a> Decoder<'a> {
             })
             .collect();
         let suppress_tokens = Tensor::new(suppress_tokens.as_slice(), device)?;
-        let sot_token = token_id(&tokenizer, m::SOT_TOKEN)?;
-        let transcribe_token = token_id(&tokenizer, m::TRANSCRIBE_TOKEN)?;
-        let translate_token = token_id(&tokenizer, m::TRANSLATE_TOKEN)?;
-        let eot_token = token_id(&tokenizer, m::EOT_TOKEN)?;
+        let sot_token = token_id(tokenizer, m::SOT_TOKEN)?;
+        let transcribe_token = token_id(tokenizer, m::TRANSCRIBE_TOKEN)?;
+        let translate_token = token_id(tokenizer, m::TRANSLATE_TOKEN)?;
+        let eot_token = token_id(tokenizer, m::EOT_TOKEN)?;
         let no_speech_token = m::NO_SPEECH_TOKENS
             .iter()
-            .find_map(|token| token_id(&tokenizer, token).ok());
+            .find_map(|token| token_id(tokenizer, token).ok());
         let no_speech_token = match no_speech_token {
             None => anyhow::bail!("unable to find any non-speech token"),
             Some(n) => n,

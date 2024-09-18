@@ -1,8 +1,6 @@
-use std::{
-    path::PathBuf,
-};
+use std::path::PathBuf;
 
-use anyhow::{Result};
+use anyhow::Result;
 use chrono::Utc;
 use log::{debug, info, warn};
 #[cfg(target_os = "macos")]
@@ -15,7 +13,7 @@ use rubato::{
 
 use crate::{
     encode_single_audio,
-    vad_engine::{VadEngine},
+    vad_engine::VadEngine,
 };
 
 
@@ -102,7 +100,7 @@ pub fn perform_stt(
             );
             fallback_engine.as_ref().unwrap().transcribe(&speech_frames, audio_input.sample_rate, &audio_input.device)?
         }
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(e),
     };
 
     let new_file_name = Utc::now().format("%Y-%m-%d_%H-%M-%S").to_string();

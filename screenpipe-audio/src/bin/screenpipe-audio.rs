@@ -94,8 +94,7 @@ async fn main() -> Result<()> {
     // Spawn threads for each device
     let recording_threads: Vec<_> = devices
         .into_iter()
-        .enumerate()
-        .map(|(_, device)| {
+        .map(|device| {
             let device = Arc::new(device);
             let whisper_sender = whisper_sender.clone();
             let device_control = Arc::new(AtomicBool::new(true));

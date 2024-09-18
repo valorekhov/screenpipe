@@ -13,9 +13,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 
 #[derive(Clone, Debug, PartialEq)]
+#[derive(Default)]
 pub enum AudioTranscriptionEngine {
     RestPipe,
     Deepgram,
+    #[default]
     WhisperTiny,
     WhisperDistilLargeV3,
 }
@@ -31,11 +33,6 @@ impl fmt::Display for AudioTranscriptionEngine {
     }
 }
 
-impl Default for AudioTranscriptionEngine {
-    fn default() -> Self {
-        AudioTranscriptionEngine::WhisperTiny
-    }
-}
 
 #[derive(Clone)]
 pub struct DeviceControl {
@@ -165,7 +162,7 @@ pub async fn record_and_transcribe(
 ) -> Result<()> {
     let (cpal_audio_device, config) = get_device_and_config(&audio_device).await?;
     let sample_rate = config.sample_rate().0;
-    let channels = config.channels() as u16;
+    let channels = config.channels();
     debug!(
         "Audio device config: sample_rate={}, channels={}",
         sample_rate, channels
@@ -387,6 +384,6 @@ pub async fn default_output_device() -> Result<AudioDevice> {
         let device = host
             .default_output_device()
             .ok_or_else(|| anyhow!("No default output device found"))?;
-        return Ok(AudioDevice::new(device.name()?, DeviceType::Output));
+        Ok(AudioDevice::new(device.name()?, DeviceType::Output))
     }
 }

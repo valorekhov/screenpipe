@@ -157,7 +157,7 @@ mod tests {
     // Helper function to get audio duration (you'll need to implement this)
     fn get_audio_duration(path: &PathBuf) -> Result<Duration, Box<dyn std::error::Error>> {
         let output = Command::new("ffprobe")
-            .args(&[
+            .args([
                 "-v",
                 "error",
                 "-show_entries",
@@ -257,7 +257,7 @@ mod tests {
         }
 
         // Clean up
-        let _ = recording_thread.abort();
+        recording_thread.abort();
         std::fs::remove_file(output_path_2).unwrap_or_default();
     }
 }

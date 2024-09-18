@@ -47,7 +47,7 @@ impl SttEngine for WhisperEngine {
 
 
         debug!("device: {}, converting pcm to mel spectrogram", device_name);
-        let mel = audio::pcm_to_mel(&model.config(), audio_data, &self.mel_filters);
+        let mel = audio::pcm_to_mel(model.config(), audio_data, &self.mel_filters);
         let mel_len = mel.len();
         debug!("device: {}, creating tensor from mel spectrogram", device_name);
         let mel = Tensor::from_vec(
@@ -57,22 +57,22 @@ impl SttEngine for WhisperEngine {
                 model.config().num_mel_bins,
                 mel_len / model.config().num_mel_bins,
             ),
-            &device,
+            device,
         )?;
 
         debug!("device: {}, detecting language", device_name);
         let language_token = Some(multilingual::detect_language(
             &mut model.clone(),
-            &tokenizer,
+            tokenizer,
             &mel,
         )?);
         let mut model = model.clone();
         debug!("device: {}, initializing decoder", device_name);
         let mut dc = Decoder::new(
             &mut model,
-            &tokenizer,
+            tokenizer,
             42,
-            &device,
+            device,
             language_token,
             Some(Task::Transcribe),
             true,
