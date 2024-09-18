@@ -1,34 +1,23 @@
 use std::{
     path::PathBuf,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Error as E, Result};
-use candle::{Device, IndexOp, Tensor};
-use candle_nn::{ops::softmax, VarBuilder};
+use anyhow::{Result};
 use chrono::Utc;
-use hf_hub::{api::sync::Api, Repo, RepoType};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 #[cfg(target_os = "macos")]
 use objc::rc::autoreleasepool;
-use rand::{distributions::Distribution, SeedableRng};
-use tokenizers::Tokenizer;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
-use candle_transformers::models::whisper::{self as m, audio, Config};
+use candle_transformers::models::whisper::{self as m};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 
 use crate::{
-    encode_single_audio, multilingual,
-    vad_engine::{SileroVad, VadEngine, VadEngineEnum, WebRtcVad},
-    AudioTranscriptionEngine,
+    encode_single_audio,
+    vad_engine::{VadEngine},
 };
 
-use hound::{WavSpec, WavWriter};
-use std::io::Cursor;
 
 pub(crate) mod engines;
 pub trait SttEngine {
@@ -177,6 +166,4 @@ pub struct TranscriptionResult {
     pub timestamp: u64,
     pub error: Option<String>,
 }
-use std::sync::atomic::{AtomicBool, Ordering};
 
-use engines::WhisperModel;

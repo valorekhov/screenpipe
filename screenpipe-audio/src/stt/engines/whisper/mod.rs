@@ -10,10 +10,9 @@ use log::{debug, error, info};
 use objc::rc::autoreleasepool;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
-use candle_transformers::models::whisper::{self as m, audio, Config};
 
 use crate::{
-    stt::{self, perform_stt, SttEngine}, vad_engine::{SileroVad, VadEngine, VadEngineEnum, WebRtcVad}, AudioInput, AudioTranscriptionEngine, TranscriptionResult
+    stt::{perform_stt, SttEngine}, vad_engine::{SileroVad, VadEngine, VadEngineEnum, WebRtcVad}, AudioInput, AudioTranscriptionEngine, TranscriptionResult
 };
 
 

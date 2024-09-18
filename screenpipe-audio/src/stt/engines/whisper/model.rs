@@ -2,28 +2,16 @@ use crate::stt::Task;
 
 use anyhow::{Error as E, Result};
 use candle::{Device, IndexOp, Tensor};
-use candle_nn::{ops::softmax, VarBuilder};
-use hf_hub::{api::sync::Api, Repo, RepoType};
-use log::{debug, error, info};
+use candle_nn::{ops::softmax};
+use log::{error, info};
 #[cfg(target_os = "macos")]
 use objc::rc::autoreleasepool;
 use rand::{distributions::Distribution, SeedableRng};
 use tokenizers::Tokenizer;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
-use candle_transformers::models::whisper::{self as m, audio, Config};
-use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
-};
+use candle_transformers::models::whisper::{self as m, Config};
 
-use crate::{
-    encode_single_audio, multilingual,
-    vad_engine::{SileroVad, VadEngine, VadEngineEnum, WebRtcVad},
-    AudioTranscriptionEngine,
-};
 
-use hound::{WavSpec, WavWriter};
-use std::io::Cursor;
 
 #[derive(Debug, Clone)]
 pub enum Model {
