@@ -1,15 +1,16 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use log::info;
-use screenpipe_audio::create_whisper_channel;
+use screenpipe_audio::create_comm_channel;
 use screenpipe_audio::default_input_device;
 use screenpipe_audio::default_output_device;
 use screenpipe_audio::list_audio_devices;
 use screenpipe_audio::parse_audio_device;
 use screenpipe_audio::record_and_transcribe;
+use screenpipe_audio::stt::engines::initialize_engines;
 use screenpipe_audio::AudioDevice;
-use screenpipe_audio::AudioTranscriptionEngine;
 use screenpipe_audio::VadEngineEnum;
+use screenpipe_audio::stt::engines::whisper::CandleWhisperModel;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -30,6 +31,33 @@ struct Args {
 
     #[clap(long, help = "Deepgram API key")]
     deepgram_api_key: Option<String>,
+
+    #[clap(long, help = "API URL", conflicts_with = "deepgram_api_key")]
+    api_url: Option<String>,
+
+    #[clap(long, help = "API Headers in the `Name: Value;` format", conflicts_with = "deepgram_api_key")]
+    api_headers: Option<String>,
+
+    #[clap(short, long, help = "Enable verbose output")]
+    verbose: bool,
+    
+    // #[clap(long = "very-verbose", help = "Enable very verbose output", conflicts_with = "verbose")]
+    // very_verbose: bool,
+
+    #[clap(long, help = "Output to stdout", conflicts_with = "verbose")]
+    stdout: bool,
+
+    #[clap(long, help = "Output to clipboard")]
+    clipboard: bool,
+
+    #[clap(short, long, help = "Output to file", value_name = "FILE")]
+    file: Option<PathBuf>,
+
+    #[clap(long, help = "Recording output directory", value_name = "DIR")]
+    dir: Option<PathBuf>,
+
+    #[clap(long, help = "Local model to use", value_enum)]
+    local_model: Option<CandleWhisperModel>, 
 }
 
 fn print_devices(devices: &[AudioDevice]) {
@@ -49,12 +77,18 @@ async fn main() -> Result<()> {
     use env_logger::Builder;
     use log::LevelFilter;
 
+    let args = Args::parse();
+
     Builder::new()
-        .filter(None, LevelFilter::Debug)
+        .filter(None, if args.stdout {
+            LevelFilter::Off
+        } else if args.verbose {
+            LevelFilter::Debug
+        } else {
+            LevelFilter::Info
+        })
         .filter_module("tokenizers", LevelFilter::Error)
         .init();
-
-    let args = Args::parse();
 
     let devices = list_audio_devices().await?;
 
@@ -62,8 +96,6 @@ async fn main() -> Result<()> {
         print_devices(&devices);
         return Ok(());
     }
-
-    let deepgram_api_key = args.deepgram_api_key;
 
     let devices = if args.audio_device.is_empty() {
         vec![default_input_device()?, default_output_device().await?]
@@ -83,11 +115,19 @@ async fn main() -> Result<()> {
     std::fs::remove_file("output_1.mp4").unwrap_or_default();
 
     let chunk_duration = Duration::from_secs(10);
-    let output_path = PathBuf::from("/tmp/whisper-out");
-    let (whisper_sender, mut whisper_receiver, _) = create_whisper_channel(
-        Arc::new(AudioTranscriptionEngine::WhisperTiny),
-        VadEngineEnum::WebRtc, // Or VadEngineEnum::WebRtc, hardcoded for now
-        deepgram_api_key,
+    let output_path = args.dir.map(PathBuf::from);
+
+    let (primary_engine, fallback_engine) = initialize_engines(
+        args.local_model,
+        args.api_url,
+        args.api_headers,
+        args.deepgram_api_key,
+    )?;
+
+    let (whisper_sender, mut whisper_receiver, _) = create_comm_channel(
+        primary_engine,
+        fallback_engine,
+        VadEngineEnum::WebRtc,
         &output_path,
     )
     .await?;

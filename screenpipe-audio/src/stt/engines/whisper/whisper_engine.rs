@@ -1,4 +1,6 @@
 
+use std::{future::Future, pin::Pin};
+
 use anyhow::Result;
 use candle::Tensor;
 use log::debug;
@@ -40,51 +42,58 @@ impl WhisperEngine {
 }
 
 impl SttEngine for WhisperEngine {
-    fn transcribe(&self, audio_data: &[f32], _: u32, device_name: &str) -> Result<String> {
-        let model = &self.whisper_model.model;
-        let tokenizer = &self.whisper_model.tokenizer;
-        let device = &self.whisper_model.device;
+    fn transcribe<'a>(
+        &'a self,
+        audio_data: &'a [f32],
+        _: u32,
+        device_name: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+        Box::pin(async move {
+            let model = &self.whisper_model.model;
+            let tokenizer = &self.whisper_model.tokenizer;
+            let device = &self.whisper_model.device;
 
 
-        debug!("device: {}, converting pcm to mel spectrogram", device_name);
-        let mel = audio::pcm_to_mel(model.config(), audio_data, &self.mel_filters);
-        let mel_len = mel.len();
-        debug!("device: {}, creating tensor from mel spectrogram", device_name);
-        let mel = Tensor::from_vec(
-            mel,
-            (
-                1,
-                model.config().num_mel_bins,
-                mel_len / model.config().num_mel_bins,
-            ),
-            device,
-        )?;
+            debug!("device: {}, converting pcm to mel spectrogram", device_name);
+            let mel = audio::pcm_to_mel(model.config(), audio_data, &self.mel_filters);
+            let mel_len = mel.len();
+            debug!("device: {}, creating tensor from mel spectrogram", device_name);
+            let mel = Tensor::from_vec(
+                mel,
+                (
+                    1,
+                    model.config().num_mel_bins,
+                    mel_len / model.config().num_mel_bins,
+                ),
+                device,
+            )?;
 
-        debug!("device: {}, detecting language", device_name);
-        let language_token = Some(multilingual::detect_language(
-            &mut model.clone(),
-            tokenizer,
-            &mel,
-        )?);
-        let mut model = model.clone();
-        debug!("device: {}, initializing decoder", device_name);
-        let mut dc = Decoder::new(
-            &mut model,
-            tokenizer,
-            42,
-            device,
-            language_token,
-            Some(Task::Transcribe),
-            true,
-            false,
-        )?;
-        debug!("device: {}, starting decoding process", device_name);
-        let segments = dc.run(&mel)?;
-        debug!("device: {}, decoding complete", device_name);
-        Ok(segments
-            .iter()
-            .map(|s| s.dr.text.clone())
-            .collect::<Vec<String>>()
-            .join("\n"))
+            debug!("device: {}, detecting language", device_name);
+            let language_token = Some(multilingual::detect_language(
+                &mut model.clone(),
+                tokenizer,
+                &mel,
+            )?);
+            let mut model = model.clone();
+            debug!("device: {}, initializing decoder", device_name);
+            let mut dc = Decoder::new(
+                &mut model,
+                tokenizer,
+                42,
+                device,
+                language_token,
+                Some(Task::Transcribe),
+                true,
+                false,
+            )?;
+            debug!("device: {}, starting decoding process", device_name);
+            let segments = dc.run(&mel)?;
+            debug!("device: {}, decoding complete", device_name);
+            Ok(segments
+                .iter()
+                .map(|s| s.dr.text.clone())
+                .collect::<Vec<String>>()
+                .join("\n"))
+        })
     }
 }

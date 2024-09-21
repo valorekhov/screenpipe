@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{future::Future, path::PathBuf, pin::Pin};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -17,9 +17,9 @@ use crate::{
 };
 
 
-pub(crate) mod engines;
+pub mod engines;
 pub trait SttEngine {
-    fn transcribe(&self, audio_data: &[f32], sample_rate: u32, device_name: &str) -> Result<String>;
+    fn transcribe<'a>(&'a self, audio_data: &'a [f32], sample_rate: u32, device_name: &'a str) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,13 +30,13 @@ enum Task {
 }
 
 // Main STT function
-pub fn perform_stt(
+pub async fn perform_stt(
     audio_input: &AudioInput,
-    primary_engine: &Box<dyn SttEngine + Send>,
-    fallback_engine: &Option<Box<dyn SttEngine + Send>>,
-    vad_engine: &mut dyn VadEngine,
-    output_path: &PathBuf,
-) -> Result<(String, String)> {
+    primary_engine: &(dyn SttEngine + Send + Sync),
+    fallback_engine: Option<&(dyn SttEngine + Send + Sync)>,
+    vad_engine: &mut (dyn VadEngine + Send),
+    output_path: &Option<PathBuf>,
+) -> Result<(String, Option<String>)> {
     let mut audio_data = audio_input.data.clone();
     if audio_input.sample_rate != m::SAMPLE_RATE as u32 {
         info!(
@@ -81,7 +81,7 @@ pub fn perform_stt(
             "device: {}, no speech detected using VAD, skipping audio processing",
             audio_input.device
         );
-        return Ok(("".to_string(), "".to_string())); // Return an empty string or consider a more specific "no speech" indicator
+        return Ok(("".to_string(), None)); // Return an empty string or consider a more specific "no speech" indicator
     }
 
     debug!(
@@ -91,34 +91,39 @@ pub fn perform_stt(
         audio_data.len() / frame_size
     );
 
-    let transcription = match primary_engine.transcribe(&speech_frames, audio_input.sample_rate, &audio_input.device) {
+    let transcription = match primary_engine.transcribe(&speech_frames, audio_input.sample_rate, &audio_input.device).await {
         Ok(result) => result,
         Err(e) if fallback_engine.is_some() => {
             warn!(
                 "device: {}, primary engine failed, falling back: {:?}",
                 audio_input.device, e
             );
-            fallback_engine.as_ref().unwrap().transcribe(&speech_frames, audio_input.sample_rate, &audio_input.device)?
+            fallback_engine.as_ref().unwrap().transcribe(&speech_frames, audio_input.sample_rate, &audio_input.device).await?
         }
         Err(e) => return Err(e),
     };
 
     let new_file_name = Utc::now().format("%Y-%m-%d_%H-%M-%S").to_string();
     let sanitized_device_name = audio_input.device.to_string().replace(['/', '\\'], "_");
-    let file_path = PathBuf::from(output_path)
-        .join(format!("{}_{}.mp4", sanitized_device_name, new_file_name))
-        .to_str()
-        .expect("Failed to create valid path")
-        .to_string();
-    debug!("Saving transcription to {}", file_path);
-    let file_path_clone = file_path.clone();
-    // Run FFmpeg in a separate task
-    encode_single_audio(
-        bytemuck::cast_slice(&audio_input.data),
-        audio_input.sample_rate,
-        audio_input.channels,
-        &file_path.into(),
-    )?;
+    let file_path_clone = if let Some(output_path) = output_path {
+        let file_path = PathBuf::from(output_path)
+            .join(format!("{}_{}.mp4", sanitized_device_name, new_file_name))
+            .to_str()
+            .expect("Failed to create valid path")
+            .to_string();
+        debug!("Saving transcription to {}", file_path);
+        let file_path_clone = file_path.clone();
+        // Run FFmpeg in a separate task
+        encode_single_audio(
+            bytemuck::cast_slice(&audio_input.data),
+            audio_input.sample_rate,
+            audio_input.channels,
+            &file_path.into(),
+        )?;
+        Some(file_path_clone)
+    } else {
+        None
+    };
 
     Ok((transcription, file_path_clone))
 }

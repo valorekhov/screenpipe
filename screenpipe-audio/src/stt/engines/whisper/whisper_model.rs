@@ -1,11 +1,9 @@
 
-use std::{
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use anyhow::{Error as E, Result};
-use candle::{Device};
-use candle_nn::{VarBuilder};
+use candle::Device;
+use candle_nn::VarBuilder;
 use hf_hub::{api::sync::Api, Repo, RepoType};
 use log::{debug, info};
 #[cfg(target_os = "macos")]
@@ -14,10 +12,7 @@ use tokenizers::Tokenizer;
 
 use candle_transformers::models::whisper::{self as m, Config};
 
-use crate::{
-    AudioTranscriptionEngine
-};
-
+use crate::AudioTranscriptionEngine;
 
 use super::Model;
 

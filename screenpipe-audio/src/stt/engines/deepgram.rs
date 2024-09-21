@@ -1,35 +1,31 @@
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde_json::Value;
 
 
-use anyhow::{Result};
+use anyhow::Result;
 use log::{debug, error, info};
 #[cfg(target_os = "macos")]
 use objc::rc::autoreleasepool;
 
-
-use crate::{
-    stt::SttEngine
-};
+use crate::stt::SttEngine;
 
 use hound::{WavSpec, WavWriter};
-use std::io::Cursor;
+use std::{future::Future, io::Cursor, pin::Pin};
 
 pub struct DeepgramEngine {
     api_key: String,
 }
 
-// Replace the get_deepgram_api_key function with this:
-fn get_deepgram_api_key() -> String {
-    "7ed2a159a094337b01fd8178b914b7ae0e77822d".to_string()
-}
+// // Replace the get_deepgram_api_key function with this:
+// fn get_deepgram_api_key() -> String {
+//     "7ed2a159a094337b01fd8178b914b7ae0e77822d".to_string()
+// }
 
 impl DeepgramEngine {
     pub fn new(api_key: String) -> Self {
         Self { api_key }
     }
-    // TODO: this should use async reqwest not blocking, cause crash issue because all our code is async
-    fn transcribe_with_deepgram(
+    async fn transcribe_with_deepgram(
         api_key: &str,
         audio_data: &[f32],
         device: &str,
@@ -64,10 +60,10 @@ impl DeepgramEngine {
             .body(wav_data)
             .send();
 
-        match response {
+        match response.await {
             Ok(resp) => {
                 debug!("received response from deepgram api");
-                match resp.json::<Value>() {
+                match resp.json::<Value>().await {
                     Ok(result) => {
                         debug!("successfully parsed json response");
                         if let Some(err_code) = result.get("err_code") {
@@ -115,12 +111,19 @@ impl DeepgramEngine {
 }
 
 impl SttEngine for DeepgramEngine {
-    fn transcribe(&self, audio_data: &[f32], sample_rate: u32, device_name: &str) -> Result<String> {
-        info!(
-            "device: {}, using deepgram api key: {}...",
-            device_name,
-            &self.api_key[..8]
-        );
-        DeepgramEngine::transcribe_with_deepgram(&self.api_key, audio_data, device_name, sample_rate)
+    fn transcribe<'a>(
+        &'a self,
+        audio_data: &'a [f32],
+        sample_rate: u32,
+        device_name: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+            Box::pin(async move {
+                info!(
+                    "device: {}, using deepgram api key: {}...",
+                    device_name,
+                    &self.api_key[..8]
+                );
+                DeepgramEngine::transcribe_with_deepgram(&self.api_key, audio_data, device_name, sample_rate).await
+        })
     }
 }
