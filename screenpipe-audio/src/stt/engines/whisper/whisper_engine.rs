@@ -45,7 +45,8 @@ impl SttEngine for WhisperEngine {
     fn transcribe<'a>(
         &'a self,
         audio_data: &'a [f32],
-        _: u32,
+        _sample_rate: u32,
+        _channels: u16,
         device_name: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(async move {

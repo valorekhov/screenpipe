@@ -30,7 +30,7 @@ pub enum CandleWhisperModel {
     DistillLarge,
 }
 
-pub async fn create_whisper_channel(
+pub fn create_whisper_channel(
     audio_transcription_engine: Arc<AudioTranscriptionEngine>,
     vad_engine: VadEngineEnum,
     deepgram_api_key: Option<String>,
@@ -40,7 +40,7 @@ pub async fn create_whisper_channel(
     UnboundedReceiver<TranscriptionResult>,
     Arc<AtomicBool>, // Shutdown flag
 )> {
-    let (primary_engine, fallback_engine) = super::initialize_engines(
+    let (primary_engine, fallback_engine) = super::initialize_stt_engines(
         match (*audio_transcription_engine).clone() {
             AudioTranscriptionEngine::WhisperTiny => Some(CandleWhisperModel::Tiny),
             AudioTranscriptionEngine::WhisperDistilLargeV3 => Some(CandleWhisperModel::DistillLarge),
@@ -51,5 +51,5 @@ pub async fn create_whisper_channel(
         deepgram_api_key,
     ).expect("Failed to initialize engines");
 
-    create_comm_channel(primary_engine, fallback_engine, vad_engine, &Some(output_path.to_owned())).await
+    create_comm_channel(primary_engine, fallback_engine, vad_engine, &Some(output_path.to_owned()))
 }

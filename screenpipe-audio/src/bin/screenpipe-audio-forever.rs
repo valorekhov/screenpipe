@@ -85,8 +85,7 @@ async fn main() -> Result<()> {
         VadEngineEnum::Silero, // Or VadEngineEnum::WebRtc, hardcoded for now
         args.deepgram_api_key,
         &PathBuf::from("output.mp4"),
-    )
-    .await?;
+    )?;
     // Spawn threads for each device
     let _recording_threads: Vec<_> = devices
         .into_iter()

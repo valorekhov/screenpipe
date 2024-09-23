@@ -7,10 +7,9 @@ use log::{debug, error, info};
 #[cfg(target_os = "macos")]
 use objc::rc::autoreleasepool;
 
-use crate::stt::SttEngine;
+use crate::stt::{create_wav, SttEngine};
 
-use hound::{WavSpec, WavWriter};
-use std::{future::Future, io::Cursor, pin::Pin};
+use std::{future::Future, pin::Pin};
 
 pub struct DeepgramEngine {
     api_key: String,
@@ -30,28 +29,13 @@ impl DeepgramEngine {
         audio_data: &[f32],
         device: &str,
         sample_rate: u32,
+        channels: u16,
     ) -> Result<String> {
         debug!("starting deepgram transcription");
         let client = Client::new();
 
-        // Create a WAV file in memory
-        let mut cursor = Cursor::new(Vec::new());
-        {
-            let spec = WavSpec {
-                channels: 1,
-                sample_rate: sample_rate / 3, // for some reason 96khz device need 32 and 48khz need 16 (be mindful resampling)
-                bits_per_sample: 32,
-                sample_format: hound::SampleFormat::Float,
-            };
-            let mut writer = WavWriter::new(&mut cursor, spec)?;
-            for &sample in audio_data {
-                writer.write_sample(sample)?;
-            }
-            writer.finalize()?;
-        }
-
         // Get the WAV data from the cursor
-        let wav_data = cursor.into_inner();
+        let wav_data = create_wav(&audio_data, sample_rate, channels, cpal::SampleFormat::F32)?;
 
         let response = client
             .post("https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true")
@@ -115,6 +99,7 @@ impl SttEngine for DeepgramEngine {
         &'a self,
         audio_data: &'a [f32],
         sample_rate: u32,
+        channels: u16,
         device_name: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
             Box::pin(async move {
@@ -123,7 +108,7 @@ impl SttEngine for DeepgramEngine {
                     device_name,
                     &self.api_key[..8]
                 );
-                DeepgramEngine::transcribe_with_deepgram(&self.api_key, audio_data, device_name, sample_rate).await
+                DeepgramEngine::transcribe_with_deepgram(&self.api_key, audio_data, device_name, sample_rate, channels).await
         })
     }
 }

@@ -20,13 +20,13 @@ use crate::{
     stt::{perform_stt, SttEngine}, vad_engine::{SileroVad, VadEngine, VadEngineEnum, WebRtcVad}, AudioInput, AudioTranscriptionEngine, TranscriptionResult, WhisperModel,
 };
 
-pub fn initialize_engines(
+pub fn initialize_stt_engines(
     local_model: Option<CandleWhisperModel>,
     api_url: Option<String>,
     api_headers: Option<String>,
     deepgram_api_key: Option<String>,
 ) -> Result<(Box<dyn SttEngine + Send + Sync>, Option<Box<dyn SttEngine + Send + Sync>>)> {
-    let local_model = local_model.unwrap_or(CandleWhisperModel::Tiny);
+    let local_model_opt = local_model.clone();
     let primary_engine: Box<dyn SttEngine + Send + Sync> = if let Some(ref api_key) = deepgram_api_key {
         Box::new(DeepgramEngine::new(api_key.clone()))
     } else if let Some(ref url) = api_url {
@@ -42,9 +42,10 @@ pub fn initialize_engines(
             }
             map    
         };
-        Box::new(RestPipeEngine::new(url.clone(), api_headers))
+        // TODO: File payload field has tobe configurable
+        Box::new(RestPipeEngine::new(url.clone(), api_headers, Some("file".to_string()), Some(16000)))
     } else {
-        let whisper_model = match local_model {
+        let whisper_model = match local_model_opt.unwrap_or(CandleWhisperModel::Tiny) {
             CandleWhisperModel::Tiny => AudioTranscriptionEngine::WhisperTiny,
             _ => AudioTranscriptionEngine::WhisperDistilLargeV3,
         };
@@ -52,11 +53,15 @@ pub fn initialize_engines(
     };
 
     let fallback_engine: Option<Box<dyn SttEngine + Send + Sync>> = if deepgram_api_key.is_some() || api_url.is_some() {
-        let whisper_model = match local_model {
-            CandleWhisperModel::Tiny => AudioTranscriptionEngine::WhisperTiny,
-            _ => AudioTranscriptionEngine::WhisperDistilLargeV3,
-        };
-        Some(Box::new(WhisperEngine::new(WhisperModel::new(Arc::new(whisper_model))?).expect("Could not create the WhisperEngine")))
+        if let Some(local_model) = local_model{
+            let whisper_model = match local_model {
+                CandleWhisperModel::Tiny => AudioTranscriptionEngine::WhisperTiny,
+                _ => AudioTranscriptionEngine::WhisperDistilLargeV3,
+            };
+            Some(Box::new(WhisperEngine::new(WhisperModel::new(Arc::new(whisper_model))?).expect("Could not create the WhisperEngine")))
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -64,7 +69,7 @@ pub fn initialize_engines(
     Ok((primary_engine, fallback_engine))
 }
 
-pub async fn create_comm_channel(
+pub fn create_comm_channel(
     primary_whisper_engine: Box<dyn SttEngine + Send + Sync>,
     fallback_whisper_engine: Option<Box<dyn SttEngine + Send + Sync>>,
     vad_engine: VadEngineEnum,
@@ -165,7 +170,6 @@ pub async fn create_comm_channel(
                 else => break,
             }
         }
-        // Cleanup code here (if needed)
     });
 
     Ok((input_sender, output_receiver, shutdown_flag))
