@@ -1,18 +1,22 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
+use log::debug;
 use log::info;
+use log::warn;
 use screenpipe_audio::create_comm_channel;
 use screenpipe_audio::default_input_device;
 use screenpipe_audio::default_output_device;
 use screenpipe_audio::list_audio_devices;
 use screenpipe_audio::parse_audio_device;
 use screenpipe_audio::record_and_transcribe;
-use screenpipe_audio::stt::engines::initialize_engines;
+use screenpipe_audio::stt::engines::initialize_stt_engines;
 use screenpipe_audio::AudioDevice;
 use screenpipe_audio::VadEngineEnum;
 use screenpipe_audio::stt::engines::whisper::CandleWhisperModel;
+use tokio::time::timeout;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,6 +33,9 @@ struct Args {
     #[clap(long, help = "List available audio devices")]
     list_audio_devices: bool,
 
+    #[clap(long, help = "Local model to use", value_enum)]
+    local_model: Option<CandleWhisperModel>,
+
     #[clap(long, help = "Deepgram API key")]
     deepgram_api_key: Option<String>,
 
@@ -38,14 +45,11 @@ struct Args {
     #[clap(long, help = "API Headers in the `Name: Value;` format", conflicts_with = "deepgram_api_key")]
     api_headers: Option<String>,
 
-    #[clap(short, long, help = "Enable verbose output")]
+    #[clap(short, long, help = "Enable verbose output", conflicts_with = "very_verbose")]
     verbose: bool,
     
-    // #[clap(long = "very-verbose", help = "Enable very verbose output", conflicts_with = "verbose")]
-    // very_verbose: bool,
-
-    #[clap(long, help = "Output to stdout", conflicts_with = "verbose")]
-    stdout: bool,
+    #[clap(short = 'D', long = "very-verbose", help = "Enable very verbose output", conflicts_with = "verbose")]
+    very_verbose: bool,
 
     #[clap(long, help = "Output to clipboard")]
     clipboard: bool,
@@ -55,9 +59,6 @@ struct Args {
 
     #[clap(long, help = "Recording output directory", value_name = "DIR")]
     dir: Option<PathBuf>,
-
-    #[clap(long, help = "Local model to use", value_enum)]
-    local_model: Option<CandleWhisperModel>, 
 }
 
 fn print_devices(devices: &[AudioDevice]) {
@@ -80,12 +81,12 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     Builder::new()
-        .filter(None, if args.stdout {
-            LevelFilter::Off
-        } else if args.verbose {
+        .filter(None, if args.very_verbose {
             LevelFilter::Debug
-        } else {
+        } else if args.verbose{
             LevelFilter::Info
+        } else {
+            LevelFilter::Error
         })
         .filter_module("tokenizers", LevelFilter::Error)
         .init();
@@ -97,6 +98,12 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if let Some(dir) = &args.dir {
+        if !dir.exists() {
+            return Err(anyhow!("The specified directory does not exist: {:?}", dir));
+        }
+    }
+    
     let devices = if args.audio_device.is_empty() {
         vec![default_input_device()?, default_output_device().await?]
     } else {
@@ -111,26 +118,25 @@ async fn main() -> Result<()> {
     }
 
     // delete .mp4 files (output*.mp4)
-    std::fs::remove_file("output_0.mp4").unwrap_or_default();
-    std::fs::remove_file("output_1.mp4").unwrap_or_default();
+    //std::fs::remove_file("output_0.mp4").unwrap_or_default();
+    //std::fs::remove_file("output_1.mp4").unwrap_or_default();
 
-    let chunk_duration = Duration::from_secs(10);
+    let chunk_duration = Duration::from_secs(5);
     let output_path = args.dir.map(PathBuf::from);
 
-    let (primary_engine, fallback_engine) = initialize_engines(
+    let (primary_engine, fallback_engine) = initialize_stt_engines(
         args.local_model,
         args.api_url,
         args.api_headers,
         args.deepgram_api_key,
     )?;
 
-    let (whisper_sender, mut whisper_receiver, _) = create_comm_channel(
+    let (whisper_sender, mut whisper_receiver, shutdown_flag) = create_comm_channel(
         primary_engine,
         fallback_engine,
         VadEngineEnum::WebRtc,
         &output_path,
-    )
-    .await?;
+    )?;
     // Spawn threads for each device
     let recording_threads: Vec<_> = devices
         .into_iter()
@@ -177,8 +183,29 @@ async fn main() -> Result<()> {
     // Wait for all recording threads to finish
     for (i, thread) in recording_threads.into_iter().enumerate() {
         let file_path = thread.await.unwrap().await;
-        println!("Recording {} complete: {:?}", i, file_path);
+        info!("Recording {} complete: {:?}", i, file_path);
     }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    // Shutdown the whisper_receiver
+    shutdown_flag.store(true, Ordering::Relaxed);
+
+    // Drain the whisper_receiver
+    debug!("Draining remaining transcriptions...");
+    let drain_timeout = Duration::from_secs(30); // Adjust as needed
+    let drain_start = std::time::Instant::now();
+
+    while let Ok(Some(result)) = timeout(drain_timeout.saturating_sub(drain_start.elapsed()), whisper_receiver.recv()).await {
+        debug!("Drained transcription for device: {}", result.input.device);
+        if drain_start.elapsed() >= drain_timeout {
+            warn!("Draining timed out");
+            break;
+        }
+    }
+
+    debug!("Finished draining transcriptions");
+    info!("Application ending");
 
     Ok(())
 }
