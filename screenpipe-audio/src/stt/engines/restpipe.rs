@@ -39,8 +39,6 @@ impl RestPipeEngine {
             debug!("Request header: {} = {}", key, value);
             request = request.header(key, value);
         }
-        
-        println!("{:?}", request);
 
         let response = request.send().await;
 
@@ -55,11 +53,24 @@ impl RestPipeEngine {
                 match response.status() {
                     reqwest::StatusCode::OK => {
                         debug!("Received successful response from RestPipe API");
-                        let transcription = response.text().await?;
 
-                        // TODO: check if response is json
+                        let content_type = response.headers().get(reqwest::header::CONTENT_TYPE);
+                        let transcription = if let Some(content_type) = content_type {
+                            if content_type.to_str().unwrap_or("").starts_with("application/json") {
+                                debug!("Response is JSON, parsing accordingly");
+                                let json: serde_json::Value = response.json().await?;
+                                // Assuming the transcription is in a "text" field, adjust as needed
+                                let transcription = json["text"].as_str().unwrap_or("").to_string();
+                                transcription
+                            } else {
+                                debug!("Response is not JSON, treating as plain text");
+                                response.text().await?
+                            }
+                        } else {
+                            debug!("No Content-Type header, treating response as plain text");
+                            response.text().await?
+                        };
 
-                        
                         if transcription.is_empty() {
                             info!(
                                 "device: {}, transcription is empty",

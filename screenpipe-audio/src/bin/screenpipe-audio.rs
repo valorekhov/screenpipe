@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
+use copypasta::ClipboardContext;
+use copypasta::ClipboardProvider;
 use log::debug;
 use log::info;
 use log::warn;
@@ -163,11 +165,17 @@ async fn main() -> Result<()> {
     let max_consecutive_timeouts = 3; // Adjust this value as needed
 
     // Main loop to receive and print transcriptions
+    let mut transcription_buffer = String::new();
+
     loop {
         match whisper_receiver.try_recv() {
             Ok(result) => {
                 info!("Transcription: {:?}", result);
                 consecutive_timeouts = 0; // Reset the counter on successful receive
+                if let Some(text) = result.transcription {
+                    transcription_buffer.push_str(&text);
+                    transcription_buffer.push(' '); // Add space between chunks
+                }
             }
             Err(_) => {
                 consecutive_timeouts += 1;
@@ -186,23 +194,33 @@ async fn main() -> Result<()> {
         info!("Recording {} complete: {:?}", i, file_path);
     }
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-
     // Shutdown the whisper_receiver
     shutdown_flag.store(true, Ordering::Relaxed);
 
     // Drain the whisper_receiver
     debug!("Draining remaining transcriptions...");
-    let drain_timeout = Duration::from_secs(30); // Adjust as needed
+    let drain_timeout = Duration::from_secs(10); // Adjust as needed
     let drain_start = std::time::Instant::now();
 
     while let Ok(Some(result)) = timeout(drain_timeout.saturating_sub(drain_start.elapsed()), whisper_receiver.recv()).await {
         debug!("Drained transcription for device: {}", result.input.device);
+        // if let Some(text) = result.transcription {
+        //     transcription_buffer.push_str(&text);
+        //     transcription_buffer.push(' ');
+        // }
         if drain_start.elapsed() >= drain_timeout {
             warn!("Draining timed out");
             break;
         }
     }
+
+    if args.clipboard && !transcription_buffer.is_empty() {
+        let mut ctx: ClipboardContext = ClipboardContext::new().unwrap();
+        ctx.set_contents(transcription_buffer.trim().to_owned()).unwrap();
+        debug!("Copied to clipboard: {}", transcription_buffer);
+    }
+
+    println!("{}", transcription_buffer);
 
     debug!("Finished draining transcriptions");
     info!("Application ending");
