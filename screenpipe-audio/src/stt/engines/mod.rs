@@ -5,9 +5,10 @@ mod restpipe;
 pub use deepgram::DeepgramEngine;
 use restpipe::RestPipeEngine;
 use whisper::{CandleWhisperModel, WhisperEngine};
+use tokio::sync::watch;
 
 use std::{
-    collections::HashMap, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc}, time::{SystemTime, UNIX_EPOCH}
+    collections::HashMap, path::PathBuf, sync::Arc, time::{SystemTime, UNIX_EPOCH}
 };
 
 use anyhow::Result;
@@ -17,8 +18,10 @@ use objc::rc::autoreleasepool;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::{
-    stt::{perform_stt, SttEngine}, vad_engine::{SileroVad, VadEngine, VadEngineEnum, WebRtcVad}, AudioInput, AudioTranscriptionEngine, TranscriptionResult, WhisperModel,
+    stt::{perform_stt, SttEngine, SttErrorKind}, vad_engine::{SileroVad, VadEngine, VadEngineEnum, WebRtcVad}, AudioInput, AudioTranscriptionEngine, TranscriptionResult, WhisperModel,
 };
+
+use super::RecordingState;
 
 pub fn initialize_stt_engines(
     local_model: Option<CandleWhisperModel>,
@@ -77,7 +80,8 @@ pub fn create_comm_channel(
 ) -> Result<(
     UnboundedSender<AudioInput>,
     UnboundedReceiver<TranscriptionResult>,
-    Arc<AtomicBool>, // Shutdown flag
+    watch::Sender<RecordingState>,
+    watch::Receiver<RecordingState>
 )> {
     let (input_sender, mut input_receiver): (
         UnboundedSender<AudioInput>,
@@ -87,20 +91,31 @@ pub fn create_comm_channel(
         UnboundedSender<TranscriptionResult>,
         UnboundedReceiver<TranscriptionResult>,
     ) = unbounded_channel();
+
+    let (state_tx, state_rx) = watch::channel(RecordingState::Initializing);
+
     let mut vad_engine: Box<dyn VadEngine + Send> = match vad_engine {
         VadEngineEnum::WebRtc => Box::new(WebRtcVad::new()),
         VadEngineEnum::Silero => Box::new(SileroVad::new()?),
     };
 
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
-    let shutdown_flag_clone = shutdown_flag.clone();
     let output_path = output_path.clone();
+    let state_rx_clone = state_rx.clone();
+    let state_tx_clone = state_tx.clone();
 
     tokio::spawn(async move {
         loop {
-            if shutdown_flag_clone.load(Ordering::Relaxed) {
-                info!("Whisper channel shutting down");
-                break;
+            if state_rx_clone.has_changed().unwrap_or(false) {
+                let state = *state_rx_clone.borrow();
+                match state {
+                    RecordingState::Draining | RecordingState::Stopping => {
+                        info!("Whisper channel shutting down");
+                        break;
+                    }
+                    _ => {
+                        debug!("Continuing processing with {:?}...", state);
+                    }
+                }
             }
             debug!("Waiting for input from input_receiver");
 
@@ -116,25 +131,7 @@ pub fn create_comm_channel(
                         #[cfg(target_os = "macos")]
                         {
                             autoreleasepool(|| {
-                                match perform_stt(&input, &*primary_whisper_engine, fallback_whisper_engine.as_deref(), &mut *vad_engine, &output_path).await {
-                                    Ok((transcription, path)) => TranscriptionResult {
-                                        input: input.clone(),
-                                        transcription: Some(transcription),
-                                        path,
-                                        timestamp,
-                                        error: None,
-                                    },
-                                    Err(e) => {
-                                        error!("STT error for input {}: {:?}", input.device, e);
-                                        TranscriptionResult {
-                                            input: input.clone(),
-                                            transcription: None,
-                                            path: "".to_string(),
-                                            timestamp,
-                                            error: Some(e.to_string()),
-                                        }
-                                    },
-                                }
+                                handle_stt(&input, &*primary_whisper_engine, fallback_whisper_engine.as_deref(), &mut *vad_engine, &output_path, timestamp, &state_tx_clone).await
                             })
                         }
                         #[cfg(not(target_os = "macos"))]
@@ -142,35 +139,59 @@ pub fn create_comm_channel(
                             unreachable!("This code should not be reached on non-macOS platforms")
                         }
                     } else {
-                        match perform_stt(&input, &*primary_whisper_engine, fallback_whisper_engine.as_deref(), &mut *vad_engine, &output_path).await {
-                            Ok((transcription, path)) => TranscriptionResult {
-                                input: input.clone(),
-                                transcription: Some(transcription),
-                                path: path.unwrap_or("".to_string()),
-                                timestamp,
-                                error: None,
-                            },
-                            Err(e) => {
-                                error!("STT error for input {}: {:?}", input.device, e);
-                                TranscriptionResult {
-                                    input: input.clone(),
-                                    transcription: None,
-                                    path: "".to_string(),
-                                    timestamp,
-                                    error: Some(e.to_string()),
-                                }
-                            },
-                        }
+                        handle_stt(&input, &*primary_whisper_engine, fallback_whisper_engine.as_deref(), &mut *vad_engine, &output_path, timestamp, &state_tx_clone).await
                     };
 
                     if output_sender.send(transcription_result).is_err() {
                         break;
                     }
+
+                    // if RecordingState::RecordingFinished == *state_rx_clone.borrow() {
+                    //     break;
+                    // }
                 }
-                else => break,
+                else => {
+                    break
+                },
             }
         }
     });
 
-    Ok((input_sender, output_receiver, shutdown_flag))
+    Ok((input_sender, output_receiver, state_tx, state_rx))
+}
+
+async fn handle_stt(
+    input: &AudioInput,
+    primary_whisper_engine: &(dyn SttEngine + Send + Sync),
+    fallback_whisper_engine: Option<&(dyn SttEngine + Send + Sync)>,
+    vad_engine: &mut (dyn VadEngine + Send),
+    output_path: &Option<PathBuf>,
+    timestamp: u64,
+    state_tx: &watch::Sender<RecordingState>,
+) -> TranscriptionResult {
+    match perform_stt(input, primary_whisper_engine, fallback_whisper_engine, vad_engine, output_path).await {
+        Ok((transcription, path)) => TranscriptionResult {
+            input: input.clone(),
+            transcription: Some(transcription),
+            path: path.unwrap_or("".to_string()),
+            timestamp,
+            error: None,
+        },
+        Err(e) => {
+            if let Some(SttErrorKind::NoSpeech) = e.downcast_ref::<SttErrorKind>() {
+                if let Err(send_err) = state_tx.send(RecordingState::RecordingFinished) {
+                    error!("Failed to send RecordingState::Stopping: {:?}", send_err);
+                }
+            } else {
+                error!("STT error for input {}: {:?}", input.device, e);
+            }
+            TranscriptionResult {
+                input: input.clone(),
+                transcription: None,
+                path: "".to_string(),
+                timestamp,
+                error: Some(e.to_string()),
+            }
+        },
+    }
 }

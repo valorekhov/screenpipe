@@ -1,6 +1,7 @@
 use std::{future::Future, io::Cursor, path::PathBuf, pin::Pin};
 
-use anyhow::Result;
+use thiserror::Error;
+use anyhow::{Result, anyhow};
 use chrono::Utc;
 use cpal::SampleFormat;
 use hound::{WavSpec, WavWriter};
@@ -24,6 +25,11 @@ pub trait SttEngine {
     fn transcribe<'a>(&'a self, audio_data: &'a [f32], sample_rate: u32, channels: u16, device_name: &'a str) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
 }
 
+#[derive(Error, Debug)]
+enum SttErrorKind {
+    #[error("No speech detected in the audio")]
+    NoSpeech,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Task {
@@ -91,7 +97,7 @@ pub async fn perform_stt(
             "device: {}, no speech detected using VAD, skipping audio processing",
             audio_input.device
         );
-        return Ok(("".to_string(), None)); // Return an empty string or consider a more specific "no speech" indicator
+        return Err(anyhow!("No speech detected in the audio").context(SttErrorKind::NoSpeech));
     }
 
     debug!(
@@ -133,6 +139,7 @@ pub async fn perform_stt(
             audio_input.channels,
             &file_path.into(),
         )?;
+        debug!("Saved transcription to {}", file_path_clone);
         Some(file_path_clone)
     } else {
         None
@@ -283,3 +290,12 @@ pub struct TranscriptionResult {
     pub error: Option<String>,
 }
 
+#[derive(Clone, PartialEq, Debug, Copy)]
+pub enum RecordingState {
+    Initializing,
+    Recording,
+    RecordingPaused,
+    RecordingFinished,
+    Stopping,
+    Draining,
+}

@@ -1,8 +1,7 @@
+use crate::stt::RecordingState;
 use crate::AudioInput;
 use anyhow::{anyhow, Result};
-use chrono::Utc;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::StreamError;
 use log::{debug, error, info, warn};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, thread};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 
 #[derive(Clone, Debug, PartialEq)]
 #[derive(Default)]
@@ -156,9 +155,9 @@ async fn get_device_and_config(
 
 pub async fn record_and_transcribe(
     audio_device: Arc<AudioDevice>,
-    duration: Duration,
+    chunk_duration: Duration,
     whisper_sender: UnboundedSender<AudioInput>,
-    is_running: Arc<AtomicBool>,
+    state_rx: watch::Receiver<RecordingState>,
 ) -> Result<()> {
     let (cpal_audio_device, config) = get_device_and_config(&audio_device).await?;
     let sample_rate = config.sample_rate().0;
@@ -167,84 +166,66 @@ pub async fn record_and_transcribe(
         "Audio device config: sample_rate={}, channels={}",
         sample_rate, channels
     );
-    let start_time = Utc::now();
 
     let audio_data = Arc::new(Mutex::new(Vec::new()));
-    let is_running_weak = Arc::downgrade(&is_running);
+    let is_running = Arc::new(AtomicBool::new(true));
+    let is_running_clone = is_running.clone();
     let is_running_weak_2 = Arc::downgrade(&is_running);
-    let is_running_weak_3 = Arc::downgrade(&is_running);
-    let audio_data_clone = Arc::clone(&audio_data);
 
-    // Define the error callback function
-    let error_callback = move |err: StreamError| {
-        error!("An error occurred on the audio stream: {}", err);
-        if err.to_string().contains("device is no longer valid") {
-            warn!("Audio device disconnected. Stopping recording.");
-            if let Some(arc) = is_running_weak_2.upgrade() {
-                arc.store(false, Ordering::Relaxed);
-            }
-        }
-    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let whisper_sender = Arc::new(whisper_sender);
 
-    // Spawn a thread to handle the non-Send stream
+    fn build_stream<T>(
+        device: &cpal::Device,
+        config: cpal::StreamConfig,
+        audio_data: Arc<Mutex<Vec<f32>>>,
+        tx: UnboundedSender<Vec<f32>>,
+        is_running: Arc<AtomicBool>,
+        chunk_duration: Duration
+    ) -> Result<cpal::Stream>
+    where
+        T: cpal::Sample + cpal::SizedSample + bytemuck::Pod,
+    {
+        let is_running_weak = Arc::downgrade(&is_running);
+        device.build_input_stream(
+            &config,
+            move |data: &[T], _: &cpal::InputCallbackInfo| {
+                if !is_running.load(Ordering::Relaxed) {
+                    return;
+                }
+
+                // Convert the input data to f32
+                let samples: &[f32] = bytemuck::cast_slice(data);
+
+                let mut buffer = audio_data.blocking_lock();
+                buffer.extend_from_slice(samples);
+
+                // Check if the buffer has reached the chunk size
+                if buffer.len() >= (chunk_duration.as_secs() as usize) * config.sample_rate.0 as usize * config.channels as usize {
+                    let chunk = buffer.split_off(0); // Remove the chunk from the buffer
+                    tx.send(chunk).ok();
+                }
+            },
+            move |err| {
+                error!("An error occurred on the audio stream: {}", err);
+                if err.to_string().contains("device is no longer valid") {
+                    warn!("Audio device disconnected. Stopping recording.");
+                    if let Some(arc) = is_running_weak.upgrade() {
+                        arc.store(false, Ordering::Relaxed);
+                    }
+                }
+            },
+            None
+        )
+        .map_err(|e| anyhow::anyhow!(e))
+    }
+
     let audio_handle = thread::spawn(move || {
         let stream = match config.sample_format() {
-            cpal::SampleFormat::I8 => cpal_audio_device.build_input_stream(
-                &config.into(),
-                move |data: &[i8], _: &_| {
-                    if is_running_weak_3
-                        .upgrade()
-                        .map_or(false, |arc| arc.load(Ordering::Relaxed))
-                    {
-                        let mut audio_data = audio_data_clone.blocking_lock();
-                        audio_data.extend_from_slice(bytemuck::cast_slice::<i8, f32>(data));
-                    }
-                },
-                error_callback,
-                None,
-            ),
-            cpal::SampleFormat::I16 => cpal_audio_device.build_input_stream(
-                &config.into(),
-                move |data: &[i16], _: &_| {
-                    if is_running_weak_3
-                        .upgrade()
-                        .map_or(false, |arc| arc.load(Ordering::Relaxed))
-                    {
-                        let mut audio_data = audio_data_clone.blocking_lock();
-                        audio_data.extend_from_slice(bytemuck::cast_slice::<i16, f32>(data));
-                    }
-                },
-                error_callback,
-                None,
-            ),
-            cpal::SampleFormat::I32 => cpal_audio_device.build_input_stream(
-                &config.into(),
-                move |data: &[i32], _: &_| {
-                    if is_running_weak_3
-                        .upgrade()
-                        .map_or(false, |arc| arc.load(Ordering::Relaxed))
-                    {
-                        let mut audio_data = audio_data_clone.blocking_lock();
-                        audio_data.extend_from_slice(bytemuck::cast_slice::<i32, f32>(data));
-                    }
-                },
-                error_callback,
-                None,
-            ),
-            cpal::SampleFormat::F32 => cpal_audio_device.build_input_stream(
-                &config.into(),
-                move |data: &[f32], _: &_| {
-                    if is_running_weak_3
-                        .upgrade()
-                        .map_or(false, |arc| arc.load(Ordering::Relaxed))
-                    {
-                        let mut audio_data = audio_data_clone.blocking_lock();
-                        audio_data.extend_from_slice(data);
-                    }
-                },
-                error_callback,
-                None,
-            ),
+            cpal::SampleFormat::I8 => build_stream::<i8>(&cpal_audio_device, config.into(), Arc::clone(&audio_data), tx.clone(), Arc::clone(&is_running), chunk_duration),
+            cpal::SampleFormat::I16 => build_stream::<i16>(&cpal_audio_device, config.into(), Arc::clone(&audio_data), tx.clone(), Arc::clone(&is_running), chunk_duration),
+            cpal::SampleFormat::I32 => build_stream::<i32>(&cpal_audio_device, config.into(), Arc::clone(&audio_data), tx.clone(), Arc::clone(&is_running), chunk_duration),
+            cpal::SampleFormat::F32 => build_stream::<f32>(&cpal_audio_device, config.into(), Arc::clone(&audio_data), tx.clone(), Arc::clone(&is_running), chunk_duration),
             _ => {
                 error!("Unsupported sample format: {:?}", config.sample_format());
                 return;
@@ -257,7 +238,7 @@ pub async fn record_and_transcribe(
                     error!("Failed to play stream: {}", e);
                 }
                 // Keep the stream alive until the recording is done
-                while is_running_weak
+                while is_running_weak_2
                     .upgrade()
                     .map_or(false, |arc| arc.load(Ordering::Relaxed))
                 {
@@ -271,44 +252,35 @@ pub async fn record_and_transcribe(
     });
 
     info!(
-        "Recording {} for {} seconds",
+        "Recording {} continuously",
         audio_device.to_string(),
-        duration.as_secs()
     );
 
-    // wait for the duration unless is_running is false
-    while is_running.load(Ordering::Relaxed) {
-        std::thread::sleep(Duration::from_millis(100));
-        if Utc::now().timestamp() - start_time.timestamp() > duration.as_secs() as i64 {
-            debug!("Recording duration reached");
-            break;
+    while *state_rx.borrow() == RecordingState::Recording {
+        if let Some(chunk) = rx.recv().await {
+            debug!("Sending audio chunk of length {} to audio model", chunk.len());
+            if let Err(e) = whisper_sender.send(AudioInput {
+                data: chunk,
+                device: audio_device.to_string(),
+                sample_rate,
+                channels,
+            }) {
+                error!("Failed to send audio to audio model: {}", e);
+            }
+            debug!("Sent audio chunk to audio model");
         }
     }
 
-    // Signal the recording thread to stop
-    is_running.store(false, Ordering::Relaxed);
+    //Signal the recording thread to stop
+    is_running_clone.store(false, Ordering::Relaxed);
 
     // Wait for the native thread to finish
     if let Err(e) = audio_handle.join() {
         error!("Error joining audio thread: {:?}", e);
     }
 
-    debug!("Sending audio to audio model");
-    let data = audio_data.lock().await;
-    debug!("Sending audio of length {} to audio model", data.len());
-    if let Err(e) = whisper_sender.send(AudioInput {
-        data: data.clone(),
-        device: audio_device.to_string(),
-        sample_rate,
-        channels,
-    }) {
-        error!("Failed to send audio to audio model: {}", e);
-    }
-    debug!("Sent audio to audio model");
-
     Ok(())
 }
-
 pub async fn list_audio_devices() -> Result<Vec<AudioDevice>> {
     let host = cpal::default_host();
     let mut devices = Vec::new();

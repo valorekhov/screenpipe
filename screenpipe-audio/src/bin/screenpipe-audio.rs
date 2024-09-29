@@ -12,15 +12,20 @@ use screenpipe_audio::list_audio_devices;
 use screenpipe_audio::parse_audio_device;
 use screenpipe_audio::record_and_transcribe;
 use screenpipe_audio::stt::engines::initialize_stt_engines;
+use screenpipe_audio::stt::RecordingState;
 use screenpipe_audio::AudioDevice;
+use screenpipe_audio::AudioInput;
+use screenpipe_audio::TranscriptionResult;
 use screenpipe_audio::VadEngineEnum;
 use screenpipe_audio::stt::engines::whisper::CandleWhisperModel;
+use tokio::sync::watch::Receiver;
+use tokio::sync::watch::Sender;
 use tokio::time::timeout;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
+use tokio::sync::mpsc::UnboundedReceiver;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -61,6 +66,9 @@ struct Args {
 
     #[clap(long, help = "Recording output directory", value_name = "DIR")]
     dir: Option<PathBuf>,
+
+    #[clap(short, long, help = "Duration in seconds to record")]
+    duration: Option<u32>,
 }
 
 fn print_devices(devices: &[AudioDevice]) {
@@ -119,10 +127,6 @@ async fn main() -> Result<()> {
         return Err(anyhow!("No audio input devices found"));
     }
 
-    // delete .mp4 files (output*.mp4)
-    //std::fs::remove_file("output_0.mp4").unwrap_or_default();
-    //std::fs::remove_file("output_1.mp4").unwrap_or_default();
-
     let chunk_duration = Duration::from_secs(5);
     let output_path = args.dir.map(PathBuf::from);
 
@@ -133,97 +137,190 @@ async fn main() -> Result<()> {
         args.deepgram_api_key,
     )?;
 
-    let (whisper_sender, mut whisper_receiver, shutdown_flag) = create_comm_channel(
+    let (whisper_sender, whisper_receiver, state_tx, state_rx) = create_comm_channel(
         primary_engine,
         fallback_engine,
         VadEngineEnum::WebRtc,
         &output_path,
     )?;
-    // Spawn threads for each device
-    let recording_threads: Vec<_> = devices
+
+    // Spawn recording threads
+    let recording_threads = spawn_recording_threads(devices, whisper_sender, state_tx.clone(), state_rx.clone(),  chunk_duration);
+    wait_for_initialization(state_rx.clone()).await?;
+
+    // Spawn keyboard listener task
+    start_keyboard_listener_task(state_tx.clone(), state_rx.clone());
+
+    // Spawn duration task if duration is specified
+    if let Some(duration) = args.duration {
+        start_max_duration_task(state_tx.clone(), duration as u64);
+    }
+  
+    // Start main transcription loop
+    let transcription_buffer = run_transcription_loop(whisper_receiver, state_rx, state_tx).await?;
+
+    shutdown_and_cleanup(recording_threads).await?;
+
+    if args.clipboard && !transcription_buffer.is_empty() {
+        let mut ctx: ClipboardContext = ClipboardContext::new().unwrap();
+        ctx.set_contents(transcription_buffer.trim().to_owned()).unwrap();
+        info!("Copied to clipboard: {}", transcription_buffer);
+    }
+
+    println!("<|transcription|>{}</|transcription|>", transcription_buffer);
+
+    info!("Application ending");
+
+    Ok(())
+}
+
+fn start_keyboard_listener_task(state_tx: Sender<RecordingState>, state_rx: Receiver<RecordingState>) {
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut stdin = tokio::io::stdin();
+        let mut buffer = [0; 1];
+        loop {
+            if let Ok(1) = stdin.read(&mut buffer).await {
+                println!("Buffer: {:02x}", buffer[0]);
+                if buffer[0] == 10 { // ENTER ends the recording
+                    state_tx.send(RecordingState::Stopping).expect("Unable to update recording state");
+                    break;
+                } else if buffer[0] == 32 { // SPACEBAR pauses/restarts the recording
+                    let current_state = state_rx.borrow().clone();
+                    match current_state {
+                        RecordingState::Recording => state_tx.send(RecordingState::RecordingPaused).expect("Unable to set state to Paused"),
+                        RecordingState::RecordingPaused => state_tx.send(RecordingState::Recording).expect("Unable to set state to Paused"),
+                        _ => {} 
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn start_max_duration_task(state_tx: Sender<RecordingState>, duration: u64) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(duration)).await;
+        state_tx.send(RecordingState::RecordingFinished).expect("Unable to update recording state to Finished");
+    });
+}
+
+fn spawn_recording_threads(
+    devices: Vec<AudioDevice>,
+    whisper_sender: tokio::sync::mpsc::UnboundedSender<AudioInput>,
+    state_tx: watch::Sender<RecordingState>,
+    state_rx: watch::Receiver<RecordingState>,
+    chunk_duration: Duration,
+) -> Vec<tokio::task::JoinHandle<Result<()>>> {
+    devices
         .into_iter()
         .map(|device| {
             let device = Arc::new(device);
             let whisper_sender = whisper_sender.clone();
-            let device_control = Arc::new(AtomicBool::new(true));
             let device_clone = Arc::clone(&device);
+            let state_tx = state_tx.clone();
+            let state_rx_clone = state_rx.clone();
 
             tokio::spawn(async move {
-                let device_control_clone = Arc::clone(&device_control);
-                let device_clone_2 = Arc::clone(&device_clone);
+                state_tx.send(RecordingState::Recording)?;
 
+                let device_clone_2 = Arc::clone(&device_clone);
+                
                 record_and_transcribe(
                     device_clone_2,
                     chunk_duration,
                     whisper_sender,
-                    device_control_clone,
-                )
+                    state_rx_clone
+                ).await?;
+
+                debug!("Finished with record_and_transcribe");
+
+                //state_tx.send(RecordingState::RecordingFinished)?;
+                Ok(())
             })
         })
-        .collect();
-    let mut consecutive_timeouts = 0;
-    let max_consecutive_timeouts = 3; // Adjust this value as needed
+        .collect()
+}
 
-    // Main loop to receive and print transcriptions
+async fn wait_for_initialization(mut rx: watch::Receiver<RecordingState>) -> Result<()> {
+    while *rx.borrow() == RecordingState::Initializing {
+        rx.changed().await?;
+    }
+    Ok(())
+}
+
+async fn run_transcription_loop(
+    mut whisper_receiver: UnboundedReceiver<TranscriptionResult>,
+    mut state_rx: watch::Receiver<RecordingState>,
+    state_tx: watch::Sender<RecordingState>,
+) -> Result<String> {
     let mut transcription_buffer = String::new();
+    let mut consecutive_timeouts = 0;
+    let max_consecutive_timeouts = 3;
 
     loop {
-        match whisper_receiver.try_recv() {
-            Ok(result) => {
-                info!("Transcription: {:?}", result);
-                consecutive_timeouts = 0; // Reset the counter on successful receive
+        tokio::select! {
+            Some(result) = whisper_receiver.recv() => {
+                info!("Transcription: {:?}", result.transcription);
+                consecutive_timeouts = 0;
                 if let Some(text) = result.transcription {
                     transcription_buffer.push_str(&text);
-                    transcription_buffer.push(' '); // Add space between chunks
+                    transcription_buffer.push(' ');
                 }
             }
-            Err(_) => {
+            Ok(()) = state_rx.changed() => {
+                let state = *state_rx.borrow();
+                debug!("Current state: {:?}", state);
+                if  state == RecordingState::Stopping || state == RecordingState::RecordingFinished {
+                    break;
+                }
+            }
+            else => {
+                let state = *state_rx.borrow();
+                debug!("Current State: {:?}", state);
+
                 consecutive_timeouts += 1;
+                info!("No transcriptions received");
                 if consecutive_timeouts >= max_consecutive_timeouts {
                     info!("No transcriptions received for a while, stopping...");
                     break;
                 }
-                continue;
             }
         }
     }
 
-    // Wait for all recording threads to finish
-    for (i, thread) in recording_threads.into_iter().enumerate() {
-        let file_path = thread.await.unwrap().await;
-        info!("Recording {} complete: {:?}", i, file_path);
-    }
+    state_tx.send(RecordingState::Draining)?;
+    drain_remaining_transcriptions(&mut whisper_receiver).await;
 
-    // Shutdown the whisper_receiver
-    shutdown_flag.store(true, Ordering::Relaxed);
+    Ok(transcription_buffer)
+}
 
-    // Drain the whisper_receiver
+async fn drain_remaining_transcriptions(
+    whisper_receiver: &mut UnboundedReceiver<TranscriptionResult>
+) {
     debug!("Draining remaining transcriptions...");
-    let drain_timeout = Duration::from_secs(10); // Adjust as needed
+    let drain_timeout = Duration::from_secs(10);
     let drain_start = std::time::Instant::now();
 
     while let Ok(Some(result)) = timeout(drain_timeout.saturating_sub(drain_start.elapsed()), whisper_receiver.recv()).await {
         debug!("Drained transcription for device: {}", result.input.device);
-        // if let Some(text) = result.transcription {
-        //     transcription_buffer.push_str(&text);
-        //     transcription_buffer.push(' ');
-        // }
         if drain_start.elapsed() >= drain_timeout {
             warn!("Draining timed out");
             break;
         }
     }
 
-    if args.clipboard && !transcription_buffer.is_empty() {
-        let mut ctx: ClipboardContext = ClipboardContext::new().unwrap();
-        ctx.set_contents(transcription_buffer.trim().to_owned()).unwrap();
-        debug!("Copied to clipboard: {}", transcription_buffer);
-    }
-
-    println!("{}", transcription_buffer);
-
     debug!("Finished draining transcriptions");
-    info!("Application ending");
+}
+
+async fn shutdown_and_cleanup(
+    recording_threads: Vec<tokio::task::JoinHandle<Result<()>>>,
+) -> Result<()> {
+
+    for (i, thread) in recording_threads.into_iter().enumerate() {
+        thread.await??;
+        info!("Recording {} complete", i);
+    }
 
     Ok(())
 }

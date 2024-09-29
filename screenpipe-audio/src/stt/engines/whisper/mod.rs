@@ -1,6 +1,6 @@
 use std::{
     path::PathBuf,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{atomic::{AtomicBool, Ordering}, Arc},
 };
 
 use anyhow::Result;
@@ -10,7 +10,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 
 use crate::{
-    vad_engine::VadEngineEnum, AudioInput, AudioTranscriptionEngine, TranscriptionResult
+    stt::RecordingState, vad_engine::VadEngineEnum, AudioInput, AudioTranscriptionEngine, TranscriptionResult
 };
 
 
@@ -51,5 +51,23 @@ pub fn create_whisper_channel(
         deepgram_api_key,
     ).expect("Failed to initialize engines");
 
-    create_comm_channel(primary_engine, fallback_engine, vad_engine, &Some(output_path.to_owned()))
+    let (sender, receiver, _, state_rx) = create_comm_channel(primary_engine, fallback_engine, vad_engine, &Some(output_path.to_owned()))?;
+
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let shutdown_flag_clone = Arc::clone(&shutdown_flag);
+    let mut state_rx = state_rx.clone();
+    tokio::spawn(async move {
+        while let Ok(_) = state_rx.changed().await {
+            let state = *state_rx.borrow();
+            match state {
+                RecordingState::Draining | RecordingState::Stopping => {
+                    shutdown_flag_clone.store(true, Ordering::SeqCst);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+    
+    Ok((sender, receiver, shutdown_flag))
 }
