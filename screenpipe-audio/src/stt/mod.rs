@@ -296,6 +296,5 @@ pub enum RecordingState {
     Recording,
     RecordingPaused,
     RecordingFinished,
-    Stopping,
-    Draining,
+    Stopping
 }

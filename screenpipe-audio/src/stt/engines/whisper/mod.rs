@@ -60,7 +60,7 @@ pub fn create_whisper_channel(
         while let Ok(_) = state_rx.changed().await {
             let state = *state_rx.borrow();
             match state {
-                RecordingState::Draining | RecordingState::Stopping => {
+                RecordingState::RecordingFinished | RecordingState::Stopping => {
                     shutdown_flag_clone.store(true, Ordering::SeqCst);
                     break;
                 }

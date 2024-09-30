@@ -62,8 +62,9 @@ webrtc-vad = "0.4.0"
 reqwest = { workspace = true }
 
 screenpipe-core = { path = "../screenpipe-core" }
-copypasta = "0.10.1"
+copypasta = {version = "0.10.1"}
 thiserror = "1.0.64"
+device_query = "2.1.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 ort = { version = "2.0.0-rc.5", features = ["download-binaries", "copy-dylibs", "directml", "cuda"] }

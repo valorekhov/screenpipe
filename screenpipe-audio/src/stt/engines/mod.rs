@@ -108,7 +108,7 @@ pub fn create_comm_channel(
             if state_rx_clone.has_changed().unwrap_or(false) {
                 let state = *state_rx_clone.borrow();
                 match state {
-                    RecordingState::Draining | RecordingState::Stopping => {
+                    RecordingState::Stopping => {
                         info!("Whisper channel shutting down");
                         break;
                     }

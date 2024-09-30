@@ -20,6 +20,7 @@ use screenpipe_audio::VadEngineEnum;
 use screenpipe_audio::stt::engines::whisper::CandleWhisperModel;
 use tokio::sync::watch::Receiver;
 use tokio::sync::watch::Sender;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,7 +47,7 @@ struct Args {
     #[clap(long, help = "Deepgram API key")]
     deepgram_api_key: Option<String>,
 
-    #[clap(long, help = "API URL", conflicts_with = "deepgram_api_key")]
+    #[clap(long, help = "API URL", conflicts_with = "deepgram_api_key", default_value = "http://localhost:5000/inference")]
     api_url: Option<String>,
 
     #[clap(long, help = "API Headers in the `Name: Value;` format", conflicts_with = "deepgram_api_key")]
@@ -67,7 +68,7 @@ struct Args {
     #[clap(long, help = "Recording output directory", value_name = "DIR")]
     dir: Option<PathBuf>,
 
-    #[clap(short, long, help = "Duration in seconds to record")]
+    #[clap(short, long, help = "Duration in seconds to record", default_value = "6")]
     duration: Option<u32>,
 }
 
@@ -149,7 +150,7 @@ async fn main() -> Result<()> {
     wait_for_initialization(state_rx.clone()).await?;
 
     // Spawn keyboard listener task
-    start_keyboard_listener_task(state_tx.clone(), state_rx.clone());
+    let kb_task_join_handle = start_keyboard_listener_task(state_tx.clone(), state_rx.clone());
 
     // Spawn duration task if duration is specified
     if let Some(duration) = args.duration {
@@ -159,11 +160,11 @@ async fn main() -> Result<()> {
     // Start main transcription loop
     let transcription_buffer = run_transcription_loop(whisper_receiver, state_rx, state_tx).await?;
 
-    shutdown_and_cleanup(recording_threads).await?;
+    shutdown_and_cleanup(recording_threads, kb_task_join_handle).await?;
 
     if args.clipboard && !transcription_buffer.is_empty() {
-        let mut ctx: ClipboardContext = ClipboardContext::new().unwrap();
-        ctx.set_contents(transcription_buffer.trim().to_owned()).unwrap();
+        let mut ctx: ClipboardContext = ClipboardContext::new().expect("Could not create clipboard manager");
+        ctx.set_contents(transcription_buffer.trim().to_owned()).expect("Could not set clipboard contents");
         info!("Copied to clipboard: {}", transcription_buffer);
     }
 
@@ -174,28 +175,48 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn start_keyboard_listener_task(state_tx: Sender<RecordingState>, state_rx: Receiver<RecordingState>) {
-    tokio::spawn(async move {
-        use tokio::io::AsyncReadExt;
-        let mut stdin = tokio::io::stdin();
-        let mut buffer = [0; 1];
+fn start_keyboard_listener_task(state_tx: Sender<RecordingState>, mut state_rx: Receiver<RecordingState>) -> JoinHandle<()> {
+    use device_query::{DeviceQuery, DeviceState, Keycode};
+    
+    tokio::spawn(async move {        
+        let mut last_keys: Vec<Keycode> = Vec::new();
         loop {
-            if let Ok(1) = stdin.read(&mut buffer).await {
-                println!("Buffer: {:02x}", buffer[0]);
-                if buffer[0] == 10 { // ENTER ends the recording
-                    state_tx.send(RecordingState::Stopping).expect("Unable to update recording state");
-                    break;
-                } else if buffer[0] == 32 { // SPACEBAR pauses/restarts the recording
-                    let current_state = state_rx.borrow().clone();
-                    match current_state {
-                        RecordingState::Recording => state_tx.send(RecordingState::RecordingPaused).expect("Unable to set state to Paused"),
-                        RecordingState::RecordingPaused => state_tx.send(RecordingState::Recording).expect("Unable to set state to Paused"),
-                        _ => {} 
+            tokio::select! {
+                Ok(()) = state_rx.changed() => {
+                    if *state_rx.borrow() == RecordingState::Stopping {
+                        debug!("Keyboard listener received stopping signal");
+                        break;
                     }
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                    let device_state = DeviceState::new();
+                    let keys = device_state.get_keys();
+                    let new_keys: Vec<_> = keys.iter().filter(|k| !last_keys.contains(k)).collect();
+
+                    for key in &new_keys {
+                        debug!("Keyboard listener received key: {:?}", key);
+                        match key {
+                            Keycode::Enter => {
+                                state_tx.send(RecordingState::RecordingFinished).expect("Unable to update recording state");
+                                return;
+                            }
+                            Keycode::Space => {
+                                let current_state = state_rx.borrow().clone();
+                                match current_state {
+                                    RecordingState::Recording => state_tx.send(RecordingState::RecordingPaused).expect("Unable to set state to Paused"),
+                                    RecordingState::RecordingPaused => state_tx.send(RecordingState::Recording).expect("Unable to set state to Recording"),
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    last_keys = keys;
                 }
             }
         }
-    });
+        debug!("Exiting Keyboard listener task");
+    })
 }
 
 fn start_max_duration_task(state_tx: Sender<RecordingState>, duration: u64) {
@@ -263,15 +284,28 @@ async fn run_transcription_loop(
             Some(result) = whisper_receiver.recv() => {
                 info!("Transcription: {:?}", result.transcription);
                 consecutive_timeouts = 0;
-                if let Some(text) = result.transcription {
-                    transcription_buffer.push_str(&text);
-                    transcription_buffer.push(' ');
+                match result.transcription {
+                    Some(text) => {
+                        if !transcription_buffer.is_empty() {
+                            transcription_buffer.push(' ');
+                        }
+                        transcription_buffer.push_str(&text);
+                        if RecordingState::RecordingFinished == *state_rx.borrow() {
+                            debug!("Recording has finished and no transcriptions are available. Exit here.");
+                            break;
+                        }
+                    },
+                    None if RecordingState::RecordingFinished == *state_rx.borrow() => {
+                        debug!("Recording has finished and no transcriptions are available. Exit here.");
+                        break;
+                    },
+                    None => {}
                 }
             }
             Ok(()) = state_rx.changed() => {
                 let state = *state_rx.borrow();
                 debug!("Current state: {:?}", state);
-                if  state == RecordingState::Stopping || state == RecordingState::RecordingFinished {
+                if  state == RecordingState::Stopping {
                     break;
                 }
             }
@@ -288,8 +322,7 @@ async fn run_transcription_loop(
             }
         }
     }
-
-    state_tx.send(RecordingState::Draining)?;
+    state_tx.send(RecordingState::Stopping)?;
     drain_remaining_transcriptions(&mut whisper_receiver).await;
 
     Ok(transcription_buffer)
@@ -315,12 +348,13 @@ async fn drain_remaining_transcriptions(
 
 async fn shutdown_and_cleanup(
     recording_threads: Vec<tokio::task::JoinHandle<Result<()>>>,
+    kb_task_join_handle: JoinHandle<()>
 ) -> Result<()> {
 
     for (i, thread) in recording_threads.into_iter().enumerate() {
         thread.await??;
         info!("Recording {} complete", i);
     }
-
+    kb_task_join_handle.await?;
     Ok(())
 }
