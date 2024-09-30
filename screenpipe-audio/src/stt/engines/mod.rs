@@ -179,6 +179,7 @@ async fn handle_stt(
         },
         Err(e) => {
             if let Some(SttErrorKind::NoSpeech) = e.downcast_ref::<SttErrorKind>() {
+                debug!("No speech detected for input {}: {:?}. Finishing recording", input.device, e);
                 if let Err(send_err) = state_tx.send(RecordingState::RecordingFinished) {
                     error!("Failed to send RecordingState::Stopping: {:?}", send_err);
                 }

@@ -1,7 +1,5 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
-use copypasta::ClipboardContext;
-use copypasta::ClipboardProvider;
 use log::debug;
 use log::info;
 use log::warn;
@@ -47,7 +45,7 @@ struct Args {
     #[clap(long, help = "Deepgram API key")]
     deepgram_api_key: Option<String>,
 
-    #[clap(long, help = "API URL", conflicts_with = "deepgram_api_key", default_value = "http://localhost:5000/inference")]
+    #[clap(long, help = "API URL", conflicts_with = "deepgram_api_key")]
     api_url: Option<String>,
 
     #[clap(long, help = "API Headers in the `Name: Value;` format", conflicts_with = "deepgram_api_key")]
@@ -59,16 +57,13 @@ struct Args {
     #[clap(short = 'D', long = "very-verbose", help = "Enable very verbose output", conflicts_with = "verbose")]
     very_verbose: bool,
 
-    #[clap(long, help = "Output to clipboard")]
-    clipboard: bool,
-
     #[clap(short, long, help = "Output to file", value_name = "FILE")]
     file: Option<PathBuf>,
 
     #[clap(long, help = "Recording output directory", value_name = "DIR")]
     dir: Option<PathBuf>,
 
-    #[clap(short, long, help = "Duration in seconds to record", default_value = "6")]
+    #[clap(short, long, help = "Duration in seconds to record")]
     duration: Option<u32>,
 }
 
@@ -149,7 +144,7 @@ async fn main() -> Result<()> {
     let recording_threads = spawn_recording_threads(devices, whisper_sender, state_tx.clone(), state_rx.clone(),  chunk_duration);
     wait_for_initialization(state_rx.clone()).await?;
 
-    // Spawn keyboard listener task
+    // TODO: Remove this. Replace with tokio control c handler for early shutdown
     let kb_task_join_handle = start_keyboard_listener_task(state_tx.clone(), state_rx.clone());
 
     // Spawn duration task if duration is specified
@@ -162,13 +157,7 @@ async fn main() -> Result<()> {
 
     shutdown_and_cleanup(recording_threads, kb_task_join_handle).await?;
 
-    if args.clipboard && !transcription_buffer.is_empty() {
-        let mut ctx: ClipboardContext = ClipboardContext::new().expect("Could not create clipboard manager");
-        ctx.set_contents(transcription_buffer.trim().to_owned()).expect("Could not set clipboard contents");
-        info!("Copied to clipboard: {}", transcription_buffer);
-    }
-
-    println!("<|transcription|>{}</|transcription|>", transcription_buffer);
+    println!("{}", transcription_buffer.trim());
 
     info!("Application ending");
 
@@ -216,13 +205,13 @@ fn start_keyboard_listener_task(state_tx: Sender<RecordingState>, mut state_rx: 
                 }
             }
         }
-        debug!("Exiting Keyboard listener task");
     })
 }
 
 fn start_max_duration_task(state_tx: Sender<RecordingState>, duration: u64) {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(duration)).await;
+        info!("Max duration reached. Stopping recording and existing.");
         state_tx.send(RecordingState::RecordingFinished).expect("Unable to update recording state to Finished");
     });
 }
@@ -292,7 +281,7 @@ async fn run_transcription_loop(
                         }
                         transcription_buffer.push_str(&text);
                         if RecordingState::RecordingFinished == *state_rx.borrow() {
-                            debug!("Recording has finished and no transcriptions are available. Exit here.");
+                            debug!("Recording has finished. Exit here.");
                             break;
                         }
                     },

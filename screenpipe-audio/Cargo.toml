@@ -62,7 +62,6 @@ webrtc-vad = "0.4.0"
 reqwest = { workspace = true }
 
 screenpipe-core = { path = "../screenpipe-core" }
-copypasta = {version = "0.10.1"}
 thiserror = "1.0.64"
 device_query = "2.1.0"
 
