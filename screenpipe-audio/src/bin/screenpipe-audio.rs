@@ -196,7 +196,8 @@ fn start_keyboard_listener_task(state_tx: Sender<RecordingState>, mut state_rx: 
                     for key in &new_keys {
                         debug!("Keyboard listener received key: {:?}", key);
                         match key {
-                            Keycode::Enter => {
+                            Keycode::Enter | Keycode::Escape => {
+                                info!("Keyboard listener received {} key. Stopping recording and existing.", key);
                                 state_tx.send(RecordingState::RecordingFinished).expect("Unable to update recording state");
                                 return;
                             }
