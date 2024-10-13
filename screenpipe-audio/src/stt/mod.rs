@@ -91,13 +91,14 @@ pub async fn perform_stt(
         speech_frames.len() / frame_size
     );
 
-    // If no speech frames detected, skip processing
-    if speech_frames.is_empty() {
+    // If no speech frames detected or less than 1 second of speech, skip processing
+    if speech_frames.is_empty() || speech_frames.len() < 100 * frame_size {
         debug!(
-            "device: {}, no speech detected using VAD, skipping audio processing",
-            audio_input.device
+            "device: {}, insufficient speech detected using VAD ({}ms), skipping audio processing",
+            audio_input.device,
+            speech_frames.len() / 16
         );
-        return Err(anyhow!("No speech detected in the audio").context(SttErrorKind::NoSpeech));
+        return Err(anyhow!("Insufficient speech detected in the audio").context(SttErrorKind::NoSpeech));
     }
 
     debug!(
